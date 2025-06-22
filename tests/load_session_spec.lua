@@ -181,4 +181,59 @@ describe("load_session", function()
         assert.equal("filterme.sess", ss.current_session)
         assert.falsy(filterme_filtered:exists())
     end)
+
+    it("delete temporary filter files even after errors", function()
+        assert.is_nil(ss.current_session)
+
+        ss.options.filter.nomap = true
+
+        filterme_sess:write("error_not_a_real_function\n", "a")
+        filterme_sess:write("echo \"We should never get this far.\"\n", "a")
+
+        ss.load_session({ args = "filterme.sess" })
+
+        assert.stub(stubs.select).was_not.called()
+        assert.stub(stubs.source).was.called_with(filterme_filtered.filename)
+        assert.is_nil(ss.current_session)
+        assert.falsy(filterme_filtered:exists())
+    end)
+
+    it("debug: load a session with no error handling", function()
+        assert.is_nil(ss.current_session)
+
+        ss.options.filter.nomap = true
+        ss.options.debug.unconditional_source = true
+
+        stubs.vim_source = spy.on(vim.cmd, "source")
+
+        ss.load_session({ args = "filterme.sess" })
+
+        assert.stub(stubs.select).was_not.called()
+        assert.stub(stubs.source).was.called_with(filterme_filtered.filename)
+        assert.stub(stubs.vim_source).was.called()
+        assert.equal("filterme.sess", ss.current_session)
+        assert.falsy(filterme_filtered:exists())
+    end)
+
+    it("debug: do not handle errors in sessions", function()
+        assert.is_nil(ss.current_session)
+
+        ss.options.filter.nomap = true
+        ss.options.debug.unconditional_source = true
+
+        filterme_sess:write("error_not_a_real_function\n", "a")
+        filterme_sess:write("echo \"We should never get this far.\"\n", "a")
+
+        stubs.vim_source = spy.on(vim.cmd, "source")
+
+        assert.has.errors(function()
+            ss.load_session({ args = "filterme.sess" })
+        end)
+
+        assert.stub(stubs.select).was_not.called()
+        assert.stub(stubs.source).was.called_with(filterme_filtered.filename)
+        assert.stub(stubs.vim_source).was.called()
+        assert.is_nil(ss.current_session)
+        assert.truthy(filterme_filtered:exists())
+    end)
 end)

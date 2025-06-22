@@ -24,6 +24,10 @@ local M = {
             -- even if we have a new enough version of Neovim that we don't
             -- need it (intended primarily for unit testing)
             joinpath_compat = false,
+            -- don't try to catch errors encountered while sourcing sessions,
+            -- which means that temporary filtered session files will not be
+            -- cleaned up (and may be investigated later)
+            unconditional_source = false,
         },
     },
     -- current options configured by the user for this plugin when it was setup
@@ -282,8 +286,42 @@ end
 -- Try to source the session with the given absolute path, and return true if
 -- successful, or false if not.
 function M._try_source(path)
-    vim.cmd.source({ args = { path } })
-    return true
+    if M.options.debug and M.options.debug.unconditional_source then
+        vim.cmd.source({ args = { path } })
+        return true
+    end
+
+    -- Ideally we would just call vim.cmd.source({ args = { path } }) directly
+    -- from Lua to load the session. That works well if the session does not
+    -- contain any errors, but it doesn't allow us to delete our filtered
+    -- session files or attempt to handle any errors. We also can't use Lua's
+    -- pcall() function try calling Vim API functions directly. It only works
+    -- with native Lua functions. In pure Vimscript, we have try/catch, so just
+    -- execute a small wrapper in pure Vim when loading the session to allow us
+    -- to catch errors and expose them to the rest of the Vim API.
+    vim.cmd([[
+        let g:session_select_try_source_result = 0
+        try
+            source ]] .. path .. "\n" .. [[
+            let g:session_select_try_source_result = 1
+        catch
+            echo "error sourcing file: " . v:exception
+            echo "error location: " . v:throwpoint
+        endtry
+    ]])
+
+    -- Since we didn't register a Vim function that we could call from Lua, and
+    -- just executed pure Vimscript directly, the only way that we have to
+    -- communicate the result is a global variable. Read that variable, and
+    -- turn it into a local boolean value in this function. Then delete the
+    -- global variable so that it doesn't pollute the global namespace. This is
+    -- pretty gross, but it works.
+    local success = (vim.g.session_select_try_source_result == 1)
+    vim.g.session_select_try_source_result = nil
+
+    -- Now that we have sourced the session and cleaned up after ourselves, we
+    -- can finally return the result.
+    return success
 end
 
 -- Load the given session, or select a new session to load.
