@@ -71,6 +71,7 @@ can do so by specifying the commands to load. Like this:
 require("lazy").setup({
   {
     "xorangekiller/session-select.nvim",
+    lazy = true,
     cmd = {
       "SaveSession",
       "LoadSession",
@@ -88,7 +89,7 @@ may be overridden by supplying it to the `setup()` function for this plugin.
 ```lua
 {
   -- directory where sessions are stored
-  storage_path = joinpath(vim.fn.stdpath("data"), "sessions"),
+  storage_path = vim.fs.normalize(vim.fn.stdpath("data") .. "/sessions"),
   -- automatically register the commands for this plugin?
   register_commands = true,
   -- options to allow filtering things out of existing sessions that are
@@ -100,6 +101,7 @@ may be overridden by supplying it to the `setup()` function for this plugin.
     -- removed from your config)
     nomap = false,
   },
+}
 ```
 
 ## Usage
@@ -128,3 +130,34 @@ There are three command provided by this plugin.
     on disk will be deleted.
   - The user may supply a session name after the command, and that is the
     session that will be deleted.
+
+## Developing
+
+If you are working on adding new features or fixing bugs in this plugin, there
+are two types of testing that you should do.
+1. **Required:** Run the unit tests with `make test`. This tests in a clean
+   environment without your normal Neovim config using
+   [`plenary.nvim`](https://github.com/nvim-lua/plenary.nvim)'s unit testing
+   framework. If you add any new functionality, please make sure that you also
+   add a unit test for it!
+2. **Recommended:** You may also want to test your changes manually by using
+   the plugin in your Neovim instance with your plugins so that you can make
+   sure that they *look* and *feel* right, and that you don't run into any
+   issues that you may have missed in your unit tests. Technically this step is
+   optional because the unit tests *should* cover the full functionality, but
+   it is recommended that you do it nonetheless.
+
+For example, loading the local in-development version of this plugin from a
+local directory rather than from its canonical source on GitHub with
+[`lazy.nvim`](https://github.com/folke/lazy.nvim) so that you can do your
+manual "look and feel" trial/testing before committing it may look something
+like this:
+```lua
+require("lazy").setup({
+  {
+    dir = vim.fs.joinpath(vim.uv.os_homedir(), "Projects/session-select.nvim"),
+    name = "xorangekiller/session-select.nvim",
+    opts = {},
+  }
+})
+```

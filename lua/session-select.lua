@@ -1,39 +1,11 @@
 -- Copyright (c) 2025 Karl Lenz <xorangekiller@gmail.com>
 -- SPDX-License-Identifier: MIT
 
--- Join the given paths into a single path.
---
--- This function emulates vim.fs.joinpath() on Neovim versions prior to 0.10.0.
--- It can be safely removed once we no longer care about supporting earlier
--- versions.
-local function joinpath(...)
-    if vim.fn.has("nvim-0.10.0") == 1 then
-        return vim.fs.joinpath(...)
-    end
-
-    if select("#", ...) == 0 then
-        return ""
-    end
-
-    -- Collect the arguments into a table so that we can iterate over them.
-    local args = {...}
-
-    local path = ""
-    for i, arg in ipairs(args) do
-        if i == 1 or not path then
-            path = arg
-        else
-            path = path .. "/" .. arg
-        end
-    end
-    return vim.fs.normalize(path)
-end
-
 local M = {
     -- default configuration options for this plugin
     defaults = {
         -- directory where sessions are stored
-        storage_path = joinpath(vim.fn.stdpath("data"), "sessions"),
+        storage_path = vim.fs.normalize(vim.fn.stdpath("data") .. "/sessions"),
         -- automatically register the commands for this plugin?
         register_commands = true,
         -- options to allow filtering things out of existing sessions that are
@@ -44,6 +16,14 @@ local M = {
             -- that contain keybindings from plugins that you have since
             -- removed from your config)
             nomap = false,
+        },
+        -- options that should only be set by developers who are working on and
+        -- debugging this module
+        debug = {
+            -- use our own internal implementation of the joinpath() function,
+            -- even if we have a new enough version of Neovim that we don't
+            -- need it (intended primarily for unit testing)
+            joinpath_compat = false,
         },
     },
     -- current options configured by the user for this plugin when it was setup
@@ -58,6 +38,12 @@ local M = {
 -- called before any other functions in this module.
 function M.setup(opts)
     M.options = vim.tbl_deep_extend("force", {}, M.defaults, opts or {})
+
+    -- Ensure that our storage path is absolute. That will ensure that if the
+    -- user changes directories later before saving, the storage path will
+    -- still remain the same as it was intended to be when it was setup,
+    -- relative to what it was when this plugin was setup.
+    M.options.storage_path = vim.fn.fnamemodify(M.options.storage_path, ":p")
 
     if M.options.register_commands then
         M.register_commands()
@@ -85,13 +71,91 @@ function M.register_commands()
     })
 end
 
+-- Do we need to use our compatibility layer for joinpath() (true), or can we
+-- use Neovim's builtin vim.fs.joinpath() function (false)?
+function M._need_joinpath_compat()
+    if M.options and M.options.debug and M.options.debug.joinpath_compat then
+        return true
+    end
+    return (vim.fn.has("nvim-0.10.0") ~= 1)
+end
+
+-- Join the given paths into a single path.
+--
+-- This function emulates vim.fs.joinpath() on Neovim versions prior to 0.10.0.
+-- It can be safely removed once we no longer care about supporting earlier
+-- versions.
+--
+-- Note: This is an internal helper function. It should not be called outside
+-- of this module.
+function M._joinpath(...)
+    if not M._need_joinpath_compat() then
+        return vim.fs.joinpath(...)
+    end
+
+    if select("#", ...) == 0 then
+        return ""
+    end
+
+    -- Collect the arguments into a table so that we can iterate over them.
+    local args = {...}
+
+    local path = ""
+    for i, arg in ipairs(args) do
+        if i == 1 or not path then
+            path = arg
+        else
+            path = path .. "/" .. arg
+        end
+    end
+    return vim.fs.normalize(path)
+end
+
+-- Return a list of all of the sessions that have been saved.
+function M._list_sessions()
+    if not vim.uv.fs_stat(M.options.storage_path) then
+        return {}
+    end
+
+    local contents = {}
+    for entry in vim.fs.dir(M.options.storage_path) do
+        local entry_path = M._joinpath(M.options.storage_path, entry)
+        local entry_stat
+        if entry ~= "" and entry_path and entry_path ~= "" then
+            entry_stat = vim.uv.fs_lstat(entry_path)
+        end
+
+        if not entry_stat or entry_stat.type ~= "file" then
+            -- Skip any entries that are not files. We don't need to do
+            -- anything here.
+        elseif entry:find(".tmpfiltered$") then
+            -- In theory, we should never have an temporary filtered sessions
+            -- in our session storage directory because they were previously
+            -- cleaned up. However, if the plugin errored out while loading a
+            -- session, it may. Silently clean them up now rather than showing
+            -- them to the user.
+            os.remove(entry_path)
+        else
+            table.insert(contents, entry)
+        end
+    end
+
+    -- Technically it isn't necessary to sort the list of sessions, but it
+    -- makes them more pleasing to look at. Otherwise they would always be
+    -- listed in the order that they were read from the filesystem, which isn't
+    -- guaranteed to be consistent each time.
+    table.sort(contents)
+
+    return contents
+end
+
 -- Save the current session with the given name, and set it as our current
 -- session so that the name may be omitted the next time we save.
 function M.save_session(params)
     local name
-    if params.args ~= "" then
+    if params.args and params.args ~= "" then
         name = params.args
-    elseif not (M.current_session == nil) then
+    elseif M.current_session then
         name = M.current_session
     else
         name = vim.fn.input("name: ")
@@ -102,24 +166,28 @@ function M.save_session(params)
         print("\n")
     end
 
-    if name ~= "" then
+    if name and name ~= "" then
         name = vim.fs.basename(name)
-        local path = joinpath(M.options.storage_path, name)
+        local path = M._joinpath(M.options.storage_path, name)
 
         -- Create the directory to save the sessions if it doesn't already
         -- exist.
         if not vim.uv.fs_stat(M.options.storage_path) then
-            uv.fs_mkdir(M.options.storage_path)
+            vim.fn.mkdir(M.options.storage_path)
         end
 
         if next(vim.fs.find(name, { path = M.options.storage_path })) == nil then
             vim.cmd.mksession({ args = { path } })
             M.current_session = name
-            print("session saved: " .. path)
+            print("session saved: " .. path .. "\n")
         else
             local confirm = 1
             if not params.bang then
-                confirm = vim.fn.confirm("overwrite session?", "&Yes\n&No", 2)
+                confirm = vim.fn.confirm(
+                    "overwrite session (" .. name .. ")?",
+                    "&Yes\n&No",
+                    2
+                )
             end
             if confirm == 1 then
                 vim.cmd.mksession({
@@ -127,13 +195,13 @@ function M.save_session(params)
                     bang = true,
                 })
                 M.current_session = name
-                print("session updated: " .. path)
+                print("session updated: " .. path .. "\n")
             else
-                print("session not updated")
+                print("session not updated\n")
             end
         end
     else
-        print("no session written")
+        print("no session written\n")
     end
 end
 
@@ -147,7 +215,7 @@ end
 -- new filtered session file is returned. The caller is responsible for
 -- removing it once it has been loaded. If nothing needed to be removed from
 -- the session file, then nil is returned.
-function M.filter_session(input)
+function M._filter_session(input)
     -- Shortcut: Don't bother reading the input file at all if no filter
     -- options are enabled.
 
@@ -211,74 +279,81 @@ function M.filter_session(input)
     return output
 end
 
+-- Try to source the session with the given absolute path, and return true if
+-- successful, or false if not.
+function M._try_source(path)
+    vim.cmd.source({ args = { path } })
+    return true
+end
+
 -- Load the given session, or select a new session to load.
 function M.load_session(params)
     local name
-    if params.args ~= "" then
+    if params.args and params.args ~= "" then
         name = params.args
     else
-        local contents = {}
-        for entry in vim.fs.dir(M.options.storage_path) do
-            if entry:find(".tmpfiltered$") then
-                os.remove(entry)
-            else
-                table.insert(contents, entry)
-            end
-        end
-        vim.ui.select(
-            contents,
-            { prompt = "Session to load:" },
-            function(choice)
-                if choice ~= nil then
-                    M.load_session({ args = choice })
+        local contents = M._list_sessions()
+        if not contents or #contents == 0 then
+            print("no sessions have been created; nothing to load\n")
+        else
+            vim.ui.select(
+                contents,
+                { prompt = "Session to load:" },
+                function(choice)
+                    if choice and choice ~= "" then
+                        M.load_session({ args = choice })
+                    end
                 end
-            end
-        )
+            )
+        end
         return
     end
 
-    if name ~= nil then
+    if name and name ~= "" then
         name = vim.fs.basename(name)
-        local path = joinpath(M.options.storage_path, name)
+        local path = M._joinpath(M.options.storage_path, name)
 
-        if params.bang or M.current_session ~= name then
-            local filtered_path = M.filter_session(path)
+        if not vim.uv.fs_stat(path) then
+            print("session does not exist: " .. name .. "\n")
+        elseif params.bang or M.current_session ~= name then
+            local filtered_path = M._filter_session(path)
+            local source_success = false
             if filtered_path then
-                vim.cmd.source({ args = { filtered_path } })
+                source_success = M._try_source(filtered_path)
                 os.remove(filtered_path)
             else
-                vim.cmd.source({ args = { path } })
+                source_success = M._try_source(path)
             end
-            M.current_session = name
-            print("loaded session: " .. path)
+            if source_success then
+                print("loaded session: " .. path .. "\n")
+                M.current_session = name
+            else
+                print("error loading session: " .. path .. "\n")
+            end
         else
-            print("session is already loaded")
+            print("session is already loaded\n")
         end
     else
-        print("no session to load")
+        print("no session to load\n")
     end
 end
 
 -- Delete the given session, or select a session to delete.
 function M.delete_session(params)
     local name
-    if params.args ~= "" then
+    if params.args and params.args ~= "" then
         name = params.args
     else
-        local contents = {}
-        if vim.uv.fs_stat(M.options.storage_path) then
-            for entry in vim.fs.dir(M.options.storage_path) do
-                table.insert(contents, entry)
-            end
-        end
-        if not contents then
+        local contents = M._list_sessions()
+        if not contents or #contents == 0 then
             print("no sessions have been created; nothing to delete")
         else
+            print("contents: " .. table.concat(contents, ", "))
             vim.ui.select(
                 contents,
                 { prompt = "Session to delete:" },
                 function(choice)
-                    if choice ~= nil then
+                    if choice and choice ~= "" then
                         M.delete_session({ args = choice })
                     end
                 end
@@ -287,29 +362,33 @@ function M.delete_session(params)
         return
     end
 
-    if name ~= nil then
+    if name and name ~= "" then
         name = vim.fs.basename(name)
-        local path = joinpath(M.options.storage_path, name)
+        local path = M._joinpath(M.options.storage_path, name)
 
-        local confirm = 1
-        if not params.bang then
-            confirm = vim.fn.confirm("delete session?", "&Yes\n&No", 2)
-        end
-        if confirm == 1 then
-            if vim.uv.fs_stat(path) then
+        if vim.uv.fs_stat(path) then
+            local confirm = 1
+            if not params.bang then
+                confirm = vim.fn.confirm(
+                    "delete session (" .. name .. ")?",
+                    "&Yes\n&No",
+                    2
+                )
+            end
+            if confirm == 1 then
                 os.remove(path)
                 if M.current_session == name then
                     M.current_session = nil
                 end
-                print("deleted session: " .. path)
+                print("deleted session: " .. path .. "\n")
             else
-                print("session does not exist: " .. name)
+                print("session deletion aborted\n")
             end
         else
-            print("session deletion aborted")
+            print("session does not exist: " .. name .. "\n")
         end
     else
-        print("no session to delete")
+        print("no session to delete\n")
     end
 end
 
