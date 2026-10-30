@@ -2,6 +2,73 @@
 -- SPDX-License-Identifier: MIT
 
 local M = {
+    -- global options that are typically owned by Neovim, the user's
+    -- configuration, or plugins and therefore should not be restored from a
+    -- session file
+    default_filter_options = {
+        -- plugin/runtime environment
+        "runtimepath",
+        "packpath",
+        "loadplugins",
+        -- session/state persistence
+        "sessionoptions",
+        "shada",
+        "shadafile",
+        -- UI chrome
+        "statusline",
+        "tabline",
+        "winbar",
+        "statuscolumn",
+        "laststatus",
+        "showtabline",
+        "cmdheight",
+        "listchars",
+        -- appearance/GUI
+        "termguicolors",
+        "background",
+        "guifont",
+        "guifontwide",
+        -- terminal/window sizing
+        "window",
+        -- global defaults for local editing options
+        "list",
+        "number",
+        "tabstop",
+        -- user interaction
+        "clipboard",
+        "mouse",
+        "helplang",
+        -- shell/environment
+        "shell",
+        "shellcmdflag",
+        "shellpipe",
+        "shellquote",
+        "shellredir",
+        "shellslash",
+        "shellxquote",
+        "shellxescape",
+        -- external tools
+        "makeprg",
+        "errorformat",
+        "grepprg",
+        "grepformat",
+        -- completion/wildcards
+        "completeopt",
+        "wildignore",
+        "wildoptions",
+        "wildignorecase",
+        -- paths
+        "undodir",
+        "backupdir",
+        "backupskip",
+        "directory",
+        "viewdir",
+        "spellfile",
+        -- encodings
+        "encoding",
+        "fileformats",
+        "fileencodings",
+    },
     -- default configuration options for this plugin
     defaults = {
         -- directory where sessions are stored
@@ -19,6 +86,10 @@ local M = {
             -- that contain keybindings from plugins that you have since
             -- removed from your config)
             nomap = false,
+            -- filter global option assignments out of the session before
+            -- loading it (true = use the built-in list, false = disable, or a
+            -- table with replace/add/remove lists)
+            options = true,
         },
         -- options that should only be set by developers who are working on and
         -- debugging this module
@@ -44,14 +115,28 @@ local M = {
 -- Typically this function will be called by your package manager. It must be
 -- called before any other functions in this module.
 function M.setup(opts)
+    opts = opts or {}
+
     -- Deep copy the defaults so that nested tables cannot be shared with and
     -- mutated by the user's configuration (or by tests).
     M.options = vim.tbl_deep_extend(
         "force",
         {},
         vim.deepcopy(M.defaults),
-        opts or {}
+        opts
     )
+
+    -- Keep filter = {} (and any non-table filter value) working as an explicit
+    -- request to disable all filtering. Other partial filter tables are merged
+    -- with the defaults normally.
+    if type(M.options.filter) ~= "table" then
+        M.options.filter = { nomap = false, options = false }
+    elseif opts.filter ~= nil
+        and type(opts.filter) == "table"
+        and next(opts.filter) == nil
+    then
+        M.options.filter = { nomap = false, options = false }
+    end
 
     -- Ensure that our storage path is absolute. That will ensure that if the
     -- user changes directories later before saving, the storage path will
@@ -219,6 +304,207 @@ function M.save_session(params)
     end
 end
 
+-- Return the canonical name of the given option, or the lowercased name if
+-- Neovim cannot resolve it (which may happen for options that are newer than
+-- the running Neovim version).
+function M._canonical_option_name(name)
+    if type(name) ~= "string" or name == "" then
+        return nil
+    end
+
+    local ok, info = pcall(vim.api.nvim_get_option_info, name)
+    if ok
+        and type(info) == "table"
+        and type(info.name) == "string"
+        and info.name ~= ""
+    then
+        return info.name
+    end
+
+    return name:lower()
+end
+
+-- Is the given option name in the set of options that we are filtering out?
+function M._option_name_is_filtered(name, filtered)
+    local lower = name:lower()
+    if filtered[lower] then
+        return true
+    end
+
+    local canonical = M._canonical_option_name(name)
+    return canonical ~= nil and filtered[canonical] == true
+end
+
+-- Is the given `:set` token setting an option that we are filtering out?
+function M._set_token_is_filtered(token, filtered)
+    local name = token:match("^([%a][%w_]*)")
+    if not name then
+        return false
+    end
+
+    if M._option_name_is_filtered(name, filtered) then
+        return true
+    end
+
+    local lower = name:lower()
+    if lower:sub(1, 2) == "no" and #lower > 2 then
+        return M._option_name_is_filtered(lower:sub(3), filtered)
+    elseif lower:sub(1, 3) == "inv" and #lower > 3 then
+        return M._option_name_is_filtered(lower:sub(4), filtered)
+    end
+
+    return false
+end
+
+-- Split the argument string of a `:set` command on unescaped whitespace while
+-- preserving backslash escapes so that values containing spaces remain valid.
+function M._split_set_args(args)
+    local tokens = {}
+    local current = {}
+    local escaped = false
+    for i = 1, #args do
+        local char = args:sub(i, i)
+        if escaped then
+            table.insert(current, char)
+            escaped = false
+        elseif char == "\\" then
+            table.insert(current, char)
+            escaped = true
+        elseif char:match("%s") then
+            if #current > 0 then
+                table.insert(tokens, table.concat(current))
+                current = {}
+            end
+        else
+            table.insert(current, char)
+        end
+    end
+
+    if #current > 0 then
+        table.insert(tokens, table.concat(current))
+    end
+
+    return tokens
+end
+
+-- Filter global option assignments out of a single session file line.
+--
+-- Returns the new line, or nil if the whole line should be removed.
+function M._filter_option_line(line, filtered)
+    local command, args = line:match("^%s*(setglobal)%s+(.+)$")
+    if not command then
+        command, args = line:match("^%s*(set)%s+(.+)$")
+    end
+
+    if command then
+        local tokens = M._split_set_args(args)
+        local kept = {}
+        for _, token in ipairs(tokens) do
+            if not M._set_token_is_filtered(token, filtered) then
+                table.insert(kept, token)
+            end
+        end
+
+        if #kept == 0 then
+            return nil
+        elseif #kept == #tokens then
+            return line
+        end
+
+        return command .. " " .. table.concat(kept, " ")
+    end
+
+    local let_option = line:match("^%s*let%s+&g:([%a][%w_]*)%s*=")
+        or line:match("^%s*let%s+&([%a][%w_]*)%s*=")
+    if let_option and M._option_name_is_filtered(let_option, filtered) then
+        return nil
+    end
+
+    return line
+end
+
+-- Resolve the configured option filter into a set of option names.
+--
+-- The filter options are designed to be user-friendly, which unfortunately
+-- means they're a bit complex for us to deal with. I think that's
+-- fundamentally a good trade-off, but it means that we need to resolve them
+-- into a canonical list of options that we should filter out at some point
+-- while loading a session file. That's what this internal helper function
+-- does. It understands the true/false syntax for our configured filter
+-- options, knows when to use the defaults versus the user's replacement
+-- options, and can apply the add/remove lists to it.
+--
+-- Returns the canonical list of options to filter out of the session file
+-- before loading it.
+function M._option_filter_set()
+    local configured = M.options
+        and M.options.filter
+        and M.options.filter.options
+
+    if configured == true then
+        configured = { replace = M.default_filter_options }
+    elseif type(configured) ~= "table" then
+        return {}
+    end
+
+    local names = {}
+    local seen = {}
+    local function add_names(list)
+        if type(list) ~= "table" then
+            return
+        end
+
+        for _, name in ipairs(list) do
+            if type(name) == "string" and name ~= "" then
+                local canonical = M._canonical_option_name(name)
+                if canonical and not seen[canonical] then
+                    seen[canonical] = true
+                    table.insert(names, name)
+                end
+            end
+        end
+    end
+
+    local base = configured.replace
+    if type(base) ~= "table" then
+        base = M.default_filter_options
+    end
+    add_names(base)
+
+    local removals = {}
+    if type(configured.remove) == "table" then
+        for _, name in ipairs(configured.remove) do
+            local canonical = M._canonical_option_name(name)
+            if canonical then
+                removals[canonical] = true
+            end
+        end
+    end
+
+    if next(removals) then
+        for i = #names, 1, -1 do
+            local canonical = M._canonical_option_name(names[i])
+            if canonical and removals[canonical] then
+                table.remove(names, i)
+                seen[canonical] = nil
+            end
+        end
+    end
+
+    add_names(configured.add)
+
+    local filtered = {}
+    for _, name in ipairs(names) do
+        filtered[name:lower()] = true
+        local canonical = M._canonical_option_name(name)
+        if canonical then
+            filtered[canonical] = true
+        end
+    end
+
+    return filtered
+end
+
 -- Read the given session file, and filter out anything that we're configured
 -- to remove.
 --
@@ -237,15 +523,11 @@ function M._filter_session(input)
         return nil
     end
 
-    local have_enabled_filters = false
-    for filter_option, filter_enabled in pairs(M.options.filter) do
-        if filter_option and filter_enabled then
-            have_enabled_filters = true
-            break
-        end
-    end
+    local nomap = M.options.filter.nomap and true or false
+    local option_filter = M._option_filter_set()
+    local filter_options = next(option_filter) ~= nil
 
-    if not have_enabled_filters then
+    if not nomap and not filter_options then
         return nil
     end
 
@@ -253,17 +535,29 @@ function M._filter_session(input)
 
     local f_in = io.open(input, "r")
     if not f_in then
-        f_out:close()
         return nil
     end
 
     local outlines = {}
     local filtered = false
     for line in f_in:lines() do
-        if M.options.filter.nomap and line:find("^%a+map") then
-            filtered = true
-        else
+        local keep = true
+        if nomap and line:find("^%a+map") then
+            keep = false
+        elseif filter_options then
+            local filtered_line = M._filter_option_line(line, option_filter)
+            if filtered_line == nil then
+                keep = false
+            elseif filtered_line ~= line then
+                line = filtered_line
+                filtered = true
+            end
+        end
+
+        if keep then
             table.insert(outlines, line)
+        else
+            filtered = true
         end
     end
 

@@ -105,6 +105,44 @@ may be overridden by supplying it to the `setup()` function for this plugin.
     -- that contain keybindings from plugins that you have since
     -- removed from your config)
     nomap = false,
+    -- filter global option assignments out of the session before loading it
+    -- (true = built-in defaults, false = disabled, or a table to adjust or
+    -- replace the built-in list)
+    options = true,
+  },
+}
+```
+
+### Filtering Session Options
+
+By default, global option assignments such as `set runtimepath=...`,
+`set statusline=...`, and `set tabline=...` are removed from sessions before
+they are loaded. This prevents old sessions from overriding settings that are
+owned by Neovim, your `init.lua`/`init.vim`, or plugins. The built-in list is
+exposed as `require("session-select").default_filter_options`. It is intended
+to be fairly conservative, but broadly applicable so that *most* users can just
+use it as-is with no adjustments.
+
+Only global assignments are filtered. `setlocal` lines are left alone so that
+per-window and per-buffer session state is still restored.
+
+If you want to override the default options that are filtered, you may do so by
+adding to the default list, removing from it, or replacing it entirely. The
+example below shows how you may do so. Although you *may* specify all three
+tables, typically you would only specify `replace` to completely replace the
+default list, or omit `replace` and specify `add` and/or `remove` to add
+options to filter to or remove them from the default list.
+```lua
+filter = {
+  options = {
+    -- filter out these options instead of the built-in defaults
+    replace = { "runtimepath", "statusline" },
+    -- add names to the base filter options list (either the "replace"
+    -- list if specified, or the built-in defaults)
+    add = { "path", "tags" },
+    -- remove names from the base filter options list (either the "replace"
+    -- list if specified, or the built-in defaults)
+    remove = { "tabline" },
   },
 }
 ```
@@ -129,6 +167,9 @@ There are three command provided by this plugin.
     are unsaved changes, it asks whether to save or discard them first. The
     load is canceled if you dismiss the prompt or the buffers cannot be saved.
     Set `wipe_before_load = false` to disable this behavior.
+  - Before sourcing the session, it filters out key mappings (if `nomap` is
+    enabled) and configuration-owned global option assignments (by default).
+    See [Filtered Session Options](#filtered-session-options).
   - Normally if you select the session that is already loaded, it will *not* be
     reloaded unless you supply `!` after the command name.
   - The user may supply a session name to load after the command, and it will

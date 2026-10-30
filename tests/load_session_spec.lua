@@ -16,6 +16,28 @@ describe("load_session", function()
 
     local stubs = {}
 
+    local function read_file(path)
+        local f = assert(io.open(path, "r"))
+        local contents = f:read("*a")
+        f:close()
+        return contents
+    end
+
+    -- Replace the _try_source() spy with a stub that captures the contents of
+    -- the file that would have been sourced and reports success.
+    local function capture_source()
+        local captured
+        stubs.source:revert()
+        stubs.source = stub.new(ss, "_try_source")
+        stubs.source.invokes(function(path)
+            captured = read_file(path)
+            return true
+        end)
+        return function()
+            return captured
+        end
+    end
+
     -- Ensure that we start each test in a known state with a few saved
     -- sessions that may be loaded.
     before_each(function()
@@ -154,6 +176,8 @@ describe("load_session", function()
     it("load a session without filtering it at all", function()
         assert.is_nil(ss.current_session)
 
+        ss.options.filter.options = false
+
         for filter_option, filter_enabled in pairs(ss.options.filter) do
             assert.falsy(filter_enabled)
         end
@@ -190,6 +214,49 @@ describe("load_session", function()
 
         assert.stub(stubs.select).was_not.called()
         assert.stub(stubs.source).was.called_with(filterme_filtered.filename)
+        assert.stub(stubs.clear).was.called()
+        assert.equal("filterme.sess", ss.current_session)
+        assert.falsy(filterme_filtered:exists())
+    end)
+
+    it("load a session with mappings and options filtered out", function()
+        assert.is_nil(ss.current_session)
+
+        ss.options.filter.nomap = true
+        filterme_sess:write("set statusline=OLD\n", "a")
+        filterme_sess:write("set runtimepath=/tmp/rtp\n", "a")
+        filterme_sess:write("set path=.,/tmp\n", "a")
+
+        local get_captured = capture_source()
+
+        ss.load_session({ args = "filterme.sess" })
+
+        local captured = get_captured()
+        assert.stub(stubs.select).was_not.called()
+        assert.truthy(captured)
+        assert.falsy(captured:find("nnoremap", 1, true))
+        assert.falsy(captured:find("statusline", 1, true))
+        assert.falsy(captured:find("runtimepath", 1, true))
+        assert.truthy(captured:find("set path=.,/tmp", 1, true))
+        assert.stub(stubs.clear).was.called()
+        assert.equal("filterme.sess", ss.current_session)
+        assert.falsy(filterme_filtered:exists())
+    end)
+
+    it("load a session without option filtering when disabled", function()
+        assert.is_nil(ss.current_session)
+
+        ss.options.filter.options = false
+        filterme_sess:write("set statusline=OLD\n", "a")
+
+        local get_captured = capture_source()
+
+        ss.load_session({ args = "filterme.sess" })
+
+        local captured = get_captured()
+        assert.stub(stubs.select).was_not.called()
+        assert.truthy(captured)
+        assert.truthy(captured:find("set statusline=OLD", 1, true))
         assert.stub(stubs.clear).was.called()
         assert.equal("filterme.sess", ss.current_session)
         assert.falsy(filterme_filtered:exists())
