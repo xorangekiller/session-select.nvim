@@ -1,4 +1,4 @@
--- Copyright (c) 2025 Karl Lenz <xorangekiller@gmail.com>
+-- Copyright (c) 2025-2026 Karl Lenz <xorangekiller@gmail.com>
 -- SPDX-License-Identifier: MIT
 
 local M = {
@@ -8,6 +8,9 @@ local M = {
         storage_path = vim.fs.normalize(vim.fn.stdpath("data") .. "/sessions"),
         -- automatically register the commands for this plugin?
         register_commands = true,
+        -- wipe all buffers/windows from the current session before loading
+        -- another session (prompts to save/discard unsaved changes)
+        wipe_before_load = true,
         -- options to allow filtering things out of existing sessions that are
         -- loaded (set to {} to disable filtering entirely)
         filter = {
@@ -41,7 +44,14 @@ local M = {
 -- Typically this function will be called by your package manager. It must be
 -- called before any other functions in this module.
 function M.setup(opts)
-    M.options = vim.tbl_deep_extend("force", {}, M.defaults, opts or {})
+    -- Deep copy the defaults so that nested tables cannot be shared with and
+    -- mutated by the user's configuration (or by tests).
+    M.options = vim.tbl_deep_extend(
+        "force",
+        {},
+        vim.deepcopy(M.defaults),
+        opts or {}
+    )
 
     -- Ensure that our storage path is absolute. That will ensure that if the
     -- user changes directories later before saving, the storage path will
@@ -324,6 +334,50 @@ function M._try_source(path)
     return success
 end
 
+-- Wipe all buffers from the current session so they don't linger alongside the
+-- session that is about to be loaded. This also closes windows and tabs that
+-- display those buffers.
+--
+-- If any buffer has unsaved changes, prompt the user to save them first.
+--
+-- Returns true if the current session was wiped, or false if the user canceled
+-- or the changes could not be saved.
+function M._clear_session()
+    local modified = false
+    for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+        if vim.api.nvim_buf_is_valid(bufnr) and vim.bo[bufnr].modified then
+            modified = true
+            break
+        end
+    end
+
+    if modified then
+        local choice = vim.fn.confirm(
+            "save unsaved changes before loading session?",
+            "&Save\n&Discard\n&Cancel",
+            3
+        )
+        if choice == 1 then
+            local ok, err = pcall(vim.cmd.wall)
+            if not ok then
+                print("error saving current session: " .. tostring(err) .. "\n")
+                return false
+            end
+        elseif choice ~= 2 then
+            -- Cancel (3) or dismissed (0).
+            return false
+        end
+    end
+
+    local ok, err = pcall(vim.cmd, "silent! %bwipeout!")
+    if not ok then
+        print("error clearing current session: " .. tostring(err) .. "\n")
+        return false
+    end
+
+    return true
+end
+
 -- Load the given session, or select a new session to load.
 function M.load_session(params)
     local name
@@ -354,6 +408,16 @@ function M.load_session(params)
         if not vim.uv.fs_stat(path) then
             print("session does not exist: " .. name .. "\n")
         elseif params.bang or M.current_session ~= name then
+            if M.options.wipe_before_load then
+                if not M._clear_session() then
+                    print("session load aborted\n")
+                    return
+                end
+                -- The previously loaded session is gone now, even if sourcing
+                -- the new session fails below.
+                M.current_session = nil
+            end
+
             local filtered_path = M._filter_session(path)
             local source_success = false
             if filtered_path then

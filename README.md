@@ -44,6 +44,8 @@ management plugins for Neovim such as
   session.
 - Ask the user before overwriting or deleting a session (unless `!` was
   specified in the command name to tell it to save/delete without asking).
+- Wipe the current session's buffers and windows before loading another
+  session (prompting to save or discard unsaved changes first).
 
 ## Requirements
 
@@ -92,6 +94,9 @@ may be overridden by supplying it to the `setup()` function for this plugin.
   storage_path = vim.fs.normalize(vim.fn.stdpath("data") .. "/sessions"),
   -- automatically register the commands for this plugin?
   register_commands = true,
+  -- wipe all buffers/windows from the current session before loading another
+  -- session (prompts to save/discard unsaved changes)
+  wipe_before_load = true,
   -- options to allow filtering things out of existing sessions that are
   -- loaded (set to {} to disable filtering entirely)
   filter = {
@@ -119,6 +124,11 @@ There are three command provided by this plugin.
     - If there is no "last session", the user will be prompted to enter a
       session name.
 - `:LoadSession` will load a saved session.
+  - Before loading, it wipes the buffers and windows from the current session
+    by default so that they do not linger alongside the new session. If there
+    are unsaved changes, it asks whether to save or discard them first. The
+    load is canceled if you dismiss the prompt or the buffers cannot be saved.
+    Set `wipe_before_load = false` to disable this behavior.
   - Normally if you select the session that is already loaded, it will *not* be
     reloaded unless you supply `!` after the command name.
   - The user may supply a session name to load after the command, and it will

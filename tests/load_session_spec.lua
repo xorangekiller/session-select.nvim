@@ -1,4 +1,4 @@
--- Copyright (c) 2025 Karl Lenz <xorangekiller@gmail.com>
+-- Copyright (c) 2025-2026 Karl Lenz <xorangekiller@gmail.com>
 -- SPDX-License-Identifier: MIT
 
 -- Test loading sessions that have previously been saved.
@@ -33,7 +33,9 @@ describe("load_session", function()
         stubs = {
             select = stub.new(vim.ui, "select"),
             source = spy.on(ss, "_try_source"),
+            clear = stub.new(ss, "_clear_session"),
         }
+        stubs.clear.returns(true)
     end)
 
     -- Ensure that we reset to a known good state after each test case.
@@ -55,6 +57,7 @@ describe("load_session", function()
 
         assert.stub(stubs.select).was_not.called()
         assert.stub(stubs.source).was.called()
+        assert.stub(stubs.clear).was.called()
         assert.equal("test.sess", ss.current_session)
     end)
 
@@ -69,6 +72,7 @@ describe("load_session", function()
 
         assert.stub(stubs.select).was.called()
         assert.stub(stubs.source).was.called()
+        assert.stub(stubs.clear).was.called()
         assert.equal("test.sess", ss.current_session)
     end)
 
@@ -79,6 +83,7 @@ describe("load_session", function()
 
         assert.stub(stubs.select).was_not.called()
         assert.stub(stubs.source).was_not.called()
+        assert.stub(stubs.clear).was_not.called()
         assert.equal("test.sess", ss.current_session)
     end)
 
@@ -89,6 +94,7 @@ describe("load_session", function()
 
         assert.stub(stubs.select).was_not.called()
         assert.stub(stubs.source).was.called()
+        assert.stub(stubs.clear).was.called()
         assert.equal("test.sess", ss.current_session)
     end)
 
@@ -103,6 +109,7 @@ describe("load_session", function()
 
         assert.stub(stubs.select).was.called()
         assert.stub(stubs.source).was_not.called()
+        assert.stub(stubs.clear).was_not.called()
         assert.is_nil(ss.current_session)
     end)
 
@@ -115,6 +122,7 @@ describe("load_session", function()
 
         assert.stub(stubs.select).was_not.called()
         assert.stub(stubs.source).was_not.called()
+        assert.stub(stubs.clear).was_not.called()
         assert.is_nil(ss.current_session)
     end)
 
@@ -125,6 +133,7 @@ describe("load_session", function()
 
         assert.stub(stubs.select).was_not.called()
         assert.stub(stubs.source).was_not.called()
+        assert.stub(stubs.clear).was_not.called()
         assert.is_nil(ss.current_session)
     end)
 
@@ -138,6 +147,7 @@ describe("load_session", function()
 
         assert.stub(stubs.select).was_not.called()
         assert.stub(stubs.source).was_not.called()
+        assert.stub(stubs.clear).was_not.called()
         assert.is_nil(ss.current_session)
     end)
 
@@ -152,6 +162,7 @@ describe("load_session", function()
 
         assert.stub(stubs.select).was_not.called()
         assert.stub(stubs.source).was.called_with(filterme_sess.filename)
+        assert.stub(stubs.clear).was.called()
         assert.equal("filterme.sess", ss.current_session)
         assert.falsy(filterme_filtered:exists())
     end)
@@ -165,6 +176,7 @@ describe("load_session", function()
 
         assert.stub(stubs.select).was_not.called()
         assert.stub(stubs.source).was.called_with(test_sess.filename)
+        assert.stub(stubs.clear).was.called()
         assert.equal("test.sess", ss.current_session)
         assert.falsy(test_filtered:exists())
     end)
@@ -178,6 +190,7 @@ describe("load_session", function()
 
         assert.stub(stubs.select).was_not.called()
         assert.stub(stubs.source).was.called_with(filterme_filtered.filename)
+        assert.stub(stubs.clear).was.called()
         assert.equal("filterme.sess", ss.current_session)
         assert.falsy(filterme_filtered:exists())
     end)
@@ -194,6 +207,7 @@ describe("load_session", function()
 
         assert.stub(stubs.select).was_not.called()
         assert.stub(stubs.source).was.called_with(filterme_filtered.filename)
+        assert.stub(stubs.clear).was.called()
         assert.is_nil(ss.current_session)
         assert.falsy(filterme_filtered:exists())
     end)
@@ -211,6 +225,7 @@ describe("load_session", function()
         assert.stub(stubs.select).was_not.called()
         assert.stub(stubs.source).was.called_with(filterme_filtered.filename)
         assert.stub(stubs.vim_source).was.called()
+        assert.stub(stubs.clear).was.called()
         assert.equal("filterme.sess", ss.current_session)
         assert.falsy(filterme_filtered:exists())
     end)
@@ -233,7 +248,46 @@ describe("load_session", function()
         assert.stub(stubs.select).was_not.called()
         assert.stub(stubs.source).was.called_with(filterme_filtered.filename)
         assert.stub(stubs.vim_source).was.called()
+        assert.stub(stubs.clear).was.called()
         assert.is_nil(ss.current_session)
         assert.truthy(filterme_filtered:exists())
+    end)
+
+    it("do not wipe the current session when wiping is disabled", function()
+        assert.is_nil(ss.current_session)
+
+        ss.options.wipe_before_load = false
+
+        ss.load_session({ args = "test.sess" })
+
+        assert.stub(stubs.clear).was_not.called()
+        assert.stub(stubs.source).was.called()
+        assert.equal("test.sess", ss.current_session)
+    end)
+
+    it("do not load the session if wiping is canceled", function()
+        ss.current_session = "previous.sess"
+        stubs.clear.returns(false)
+
+        ss.load_session({ args = "test.sess" })
+
+        assert.stub(stubs.clear).was.called()
+        assert.stub(stubs.source).was_not.called()
+        assert.equal("previous.sess", ss.current_session)
+    end)
+
+    it("reset the current session if wiping succeeds but loading fails", function()
+        ss.current_session = "previous.sess"
+        ss.options.filter.nomap = true
+
+        filterme_sess:write("error_not_a_real_function\n", "a")
+        filterme_sess:write("echo \"We should never get this far.\"\n", "a")
+
+        ss.load_session({ args = "filterme.sess" })
+
+        assert.stub(stubs.clear).was.called()
+        assert.stub(stubs.source).was.called_with(filterme_filtered.filename)
+        assert.is_nil(ss.current_session)
+        assert.falsy(filterme_filtered:exists())
     end)
 end)
