@@ -226,6 +226,58 @@ let &g:ignorecase = 1
         assert.truthy(result:find("&g:ignorecase", 1, true))
     end)
 
+    it("filter unknown option assignments", function()
+        local result = filter_contents([[
+set nosuchoptionxyz=1
+set nonosuchoptionxyz
+set invnosuchoptionxyz
+set path=.,/tmp nosuchoptionxyz=1
+setlocal nosuchoptionxyz=1
+setlocal tabstop=4
+let &g:nosuchoptionxyz = 1
+let &l:nosuchoptionxyz = 1
+let &l:tabstop = 8
+set t_Co=256
+]])
+
+        assert.truthy(result)
+        assert.falsy(result:find("nosuchoptionxyz", 1, true))
+        assert.truthy(result:find("set path=.,/tmp", 1, true))
+        assert.truthy(result:find("setlocal tabstop=4", 1, true))
+        assert.truthy(result:find("let &l:tabstop = 8", 1, true))
+        assert.truthy(result:find("set t_Co=256", 1, true))
+    end)
+
+    it("leave unknown option assignments alone when filtering is disabled", function()
+        assert.is_nil(
+            filter_contents("set nosuchoptionxyz=1\n", { options = false })
+        )
+    end)
+
+    it("drop directory changes to missing directories", function()
+        local cwd = vim.fs.normalize(vim.uv.cwd())
+        local result = filter_contents(table.concat({
+            "cd /nonexistent/session/dir",
+            "chdir /nonexistent/session/dir",
+            "lcd /nonexistent/session/dir",
+            "tcd /nonexistent/session/dir",
+            "cd " .. cwd,
+            "",
+        }, "\n"))
+
+        assert.truthy(result)
+        assert.falsy(result:find("nonexistent", 1, true))
+        assert.truthy(result:find("cd " .. cwd, 1, true))
+    end)
+
+    it("handle escaped spaces in directory changes", function()
+        local dir = vim.fs.normalize(vim.uv.cwd()) .. "/.scratch/filter/with space"
+        vim.fn.mkdir(dir, "p")
+        local escaped = dir:gsub(" ", "\\ ")
+
+        assert.is_nil(filter_contents("cd " .. escaped .. "\n"))
+    end)
+
     it("do not filter session mechanics options", function()
         local contents = table.concat({
             "set cpo&vim",

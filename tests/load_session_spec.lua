@@ -262,21 +262,59 @@ describe("load_session", function()
         assert.falsy(filterme_filtered:exists())
     end)
 
-    it("delete temporary filter files even after errors", function()
+    it("load the rest of a session after an error", function()
         assert.is_nil(ss.current_session)
 
         ss.options.filter.nomap = true
 
         filterme_sess:write("error_not_a_real_function\n", "a")
-        filterme_sess:write("echo \"We should never get this far.\"\n", "a")
+        filterme_sess:write("let g:ss_test_after_error = 1\n", "a")
 
         ss.load_session({ args = "filterme.sess" })
 
         assert.stub(stubs.select).was_not.called()
         assert.stub(stubs.source).was.called_with(filterme_filtered.filename)
         assert.stub(stubs.clear).was.called()
-        assert.is_nil(ss.current_session)
+        assert.equal(1, vim.g.ss_test_after_error)
+        assert.equal("filterme.sess", ss.current_session)
         assert.falsy(filterme_filtered:exists())
+
+        vim.g.ss_test_after_error = nil
+    end)
+
+    it("load the rest of a session after an unknown option", function()
+        assert.is_nil(ss.current_session)
+
+        ss.options.filter.nomap = true
+        ss.options.filter.options = false
+
+        filterme_sess:write("set nosuchoptionxyz=1\n", "a")
+        filterme_sess:write("let g:ss_test_after_option = 1\n", "a")
+
+        ss.load_session({ args = "filterme.sess" })
+
+        assert.stub(stubs.select).was_not.called()
+        assert.stub(stubs.source).was.called_with(filterme_filtered.filename)
+        assert.stub(stubs.clear).was.called()
+        assert.equal(1, vim.g.ss_test_after_option)
+        assert.equal("filterme.sess", ss.current_session)
+        assert.falsy(filterme_filtered:exists())
+
+        vim.g.ss_test_after_option = nil
+    end)
+
+    it("report the last error while sourcing the rest", function()
+        filterme_sess:write("error_not_a_real_function\n", "a")
+        filterme_sess:write("let g:ss_test_source_after_error = 1\n", "a")
+
+        local ok, errmsg = ss._try_source(filterme_sess.filename)
+
+        assert.is_true(ok)
+        assert.truthy(errmsg)
+        assert.truthy(errmsg:find("E492", 1, true))
+        assert.equal(1, vim.g.ss_test_source_after_error)
+
+        vim.g.ss_test_source_after_error = nil
     end)
 
     it("debug: load a session with no error handling", function()
@@ -345,16 +383,15 @@ describe("load_session", function()
 
     it("reset the current session if wiping succeeds but loading fails", function()
         ss.current_session = "previous.sess"
-        ss.options.filter.nomap = true
 
-        filterme_sess:write("error_not_a_real_function\n", "a")
-        filterme_sess:write("echo \"We should never get this far.\"\n", "a")
+        stubs.source:revert()
+        stubs.source = stub.new(ss, "_try_source")
+        stubs.source.returns(false)
 
-        ss.load_session({ args = "filterme.sess" })
+        ss.load_session({ args = "test.sess" })
 
         assert.stub(stubs.clear).was.called()
-        assert.stub(stubs.source).was.called_with(filterme_filtered.filename)
+        assert.stub(stubs.source).was.called_with(test_sess.filename)
         assert.is_nil(ss.current_session)
-        assert.falsy(filterme_filtered:exists())
     end)
 end)

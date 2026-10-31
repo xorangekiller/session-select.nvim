@@ -335,6 +335,46 @@ function M._option_name_is_filtered(name, filtered)
     return canonical ~= nil and filtered[canonical] == true
 end
 
+-- Does the given option exist in this version of Neovim?
+--
+-- Note: vim.api.nvim_get_option_info() cannot resolve terminal ("t_") options,
+-- but exists("&t_Co") can, so use exists() here instead.
+function M._option_is_known(name)
+    if type(name) ~= "string" or name == "" then
+        return false
+    end
+
+    local lower = name:lower()
+    if lower == "all" or lower == "termcap" then
+        return true
+    end
+
+    return vim.fn.exists("&" .. name) == 1
+end
+
+-- Is the given `:set` token setting an option that does not exist in this
+-- version of Neovim (for example, an option from a newer version or from a
+-- plugin/feature that is not loaded)?
+function M._set_token_is_unsupported(token)
+    local name = token:match("^([%a][%w_]*)")
+    if not name then
+        return false
+    end
+
+    if M._option_is_known(name) then
+        return false
+    end
+
+    local lower = name:lower()
+    if lower:sub(1, 2) == "no" and #name > 2 then
+        return not M._option_is_known(name:sub(3))
+    elseif lower:sub(1, 3) == "inv" and #name > 3 then
+        return not M._option_is_known(name:sub(4))
+    end
+
+    return true
+end
+
 -- Is the given `:set` token setting an option that we are filtering out?
 function M._set_token_is_filtered(token, filtered)
     local name = token:match("^([%a][%w_]*)")
@@ -387,20 +427,82 @@ function M._split_set_args(args)
     return tokens
 end
 
--- Filter global option assignments out of a single session file line.
+-- Expand a possibly escaped file name from a session file into a path that
+-- can be checked on disk.
+function M._session_path(path)
+    local unescaped = path:gsub("\\(.)", "%1")
+    return vim.fn.fnamemodify(unescaped, ":p")
+end
+
+-- Is the given line a directory-changing command whose target does not exist
+-- (or is not a directory)?
+function M._is_missing_dir_command(line)
+    local command, target = line:match("^%s*([%a]+)%s+(.+)$")
+    if not command then
+        return false
+    end
+
+    command = command:lower()
+    if
+        command ~= "cd"
+        and command ~= "chdir"
+        and command ~= "tcd"
+        and command ~= "tchdir"
+        and command ~= "lcd"
+        and command ~= "lchdir"
+    then
+        return false
+    end
+
+    -- Don't try to interpret targets that may be Vim filename modifiers or
+    -- environment variable expansions rather than literal paths. Such lines
+    -- are rare in session files (mksession writes expanded paths), and leaving
+    -- them alone is safer than dropping a valid directory change.
+    if target:find("[%%$#<]") then
+        return false
+    end
+
+    local stat = vim.uv.fs_stat(M._session_path(target))
+    return not stat or stat.type ~= "directory"
+end
+
+-- Filter option assignments out of a single session file line.
+--
+-- When `filtered` contains option names, global assignments to those options
+-- are removed. When `drop_unknown` is true, assignments to options that do not
+-- exist in this version of Neovim are removed from any of the `:set` variants
+-- (global or local).
 --
 -- Returns the new line, or nil if the whole line should be removed.
-function M._filter_option_line(line, filtered)
-    local command, args = line:match("^%s*(setglobal)%s+(.+)$")
+function M._filter_option_line(line, filtered, drop_unknown)
+    local command, args = line:match("^%s*(setlocal)%s+(.+)$")
+    if not command then
+        command, args = line:match("^%s*(setl)%s+(.+)$")
+    end
+    if not command then
+        command, args = line:match("^%s*(setglobal)%s+(.+)$")
+    end
+    if not command then
+        command, args = line:match("^%s*(setg)%s+(.+)$")
+    end
     if not command then
         command, args = line:match("^%s*(set)%s+(.+)$")
     end
+    if not command then
+        command, args = line:match("^%s*(se)%s+(.+)$")
+    end
 
     if command then
+        local is_global = command == "set"
+            or command == "se"
+            or command == "setglobal"
+            or command == "setg"
         local tokens = M._split_set_args(args)
         local kept = {}
         for _, token in ipairs(tokens) do
-            if not M._set_token_is_filtered(token, filtered) then
+            local drop = (is_global and M._set_token_is_filtered(token, filtered))
+                or (drop_unknown and M._set_token_is_unsupported(token))
+            if not drop then
                 table.insert(kept, token)
             end
         end
@@ -414,10 +516,26 @@ function M._filter_option_line(line, filtered)
         return command .. " " .. table.concat(kept, " ")
     end
 
-    local let_option = line:match("^%s*let%s+&g:([%a][%w_]*)%s*=")
-        or line:match("^%s*let%s+&([%a][%w_]*)%s*=")
-    if let_option and M._option_name_is_filtered(let_option, filtered) then
-        return nil
+    local let_scope, let_option =
+        line:match("^%s*let%s+&([gl]):([%a][%w_]*)%s*=")
+    if not let_option then
+        let_option = line:match("^%s*let%s+&([%a][%w_]*)%s*=")
+        if let_option then
+            let_scope = "g"
+        end
+    end
+
+    if let_option then
+        if
+            let_scope == "g"
+            and M._option_name_is_filtered(let_option, filtered)
+        then
+            return nil
+        end
+
+        if drop_unknown and not M._option_is_known(let_option) then
+            return nil
+        end
     end
 
     return line
@@ -506,7 +624,7 @@ function M._option_filter_set()
 end
 
 -- Read the given session file, and filter out anything that we're configured
--- to remove.
+-- to remove (or anything that we know will fail to load cleanly).
 --
 -- Note: This is a helper function, not a command. Users of this plugin are not
 -- expected to call it directly.
@@ -516,8 +634,8 @@ end
 -- removing it once it has been loaded. If nothing needed to be removed from
 -- the session file, then nil is returned.
 function M._filter_session(input)
-    -- Shortcut: Don't bother reading the input file at all if no filter
-    -- options are enabled.
+    -- Shortcut: Don't bother reading the input file at all if there is nothing
+    -- that we could possibly need to filter out.
 
     if not M.options or not M.options.filter then
         return nil
@@ -526,8 +644,21 @@ function M._filter_session(input)
     local nomap = M.options.filter.nomap and true or false
     local option_filter = M._option_filter_set()
     local filter_options = next(option_filter) ~= nil
+    -- Unknown options are part of the option filtering feature. They are
+    -- always dropped when that feature is enabled (the default), even if the
+    -- configured option list itself is empty.
+    local prune_unknown = M.options.filter.options ~= false
+    -- Removing directory changes (e.g. cd, tcd) to paths that do not exist is
+    -- part of making session loading more fault-tolerant, so it is independent
+    -- of the filter configuration. We need to enable it separately.
+    local harden = not (M.options.debug and M.options.debug.unconditional_source)
 
-    if not nomap and not filter_options then
+    if
+        not nomap
+        and not filter_options
+        and not prune_unknown
+        and not harden
+    then
         return nil
     end
 
@@ -544,8 +675,18 @@ function M._filter_session(input)
         local keep = true
         if nomap and line:find("^%a+map") then
             keep = false
-        elseif filter_options then
-            local filtered_line = M._filter_option_line(line, option_filter)
+        else
+            local filtered_line = line
+            if harden and M._is_missing_dir_command(filtered_line) then
+                filtered_line = nil
+            elseif filter_options or prune_unknown then
+                filtered_line = M._filter_option_line(
+                    filtered_line,
+                    option_filter,
+                    prune_unknown
+                )
+            end
+
             if filtered_line == nil then
                 keep = false
             elseif filtered_line ~= line then
@@ -587,45 +728,35 @@ function M._filter_session(input)
     return output
 end
 
--- Try to source the session with the given absolute path, and return true if
--- successful, or false if not.
+-- Try to source the session with the given absolute path.
+--
+-- Returns true and the last error message (or nil if there was no error) if
+-- the session was sourced, or false and an error message if it could not be
+-- sourced at all.
 function M._try_source(path)
     if M.options.debug and M.options.debug.unconditional_source then
         vim.cmd.source({ args = { path } })
-        return true
+        return true, nil
     end
 
-    -- Ideally we would just call vim.cmd.source({ args = { path } }) directly
-    -- from Lua to load the session. That works well if the session does not
-    -- contain any errors, but it doesn't allow us to delete our filtered
-    -- session files or attempt to handle any errors. We also can't use Lua's
-    -- pcall() function try calling Vim API functions directly. It only works
-    -- with native Lua functions. In pure Vimscript, we have try/catch, so just
-    -- execute a small wrapper in pure Vim when loading the session to allow us
-    -- to catch errors and expose them to the rest of the Vim API.
-    vim.cmd([[
-        let g:session_select_try_source_result = 0
-        try
-            source ]] .. path .. "\n" .. [[
-            let g:session_select_try_source_result = 1
-        catch
-            echo "error sourcing file: " . v:exception
-            echo "error location: " . v:throwpoint
-        endtry
-    ]])
+    -- Sourcing a file from Lua runs it inside an active try conditional, and
+    -- Vim aborts a sourced script at the first error when a try conditional is
+    -- active. Prefixing the source command with `silent!` avoids that: Vim
+    -- skips the failing command, records the error in v:errmsg, and continues
+    -- with the rest of the session, which is exactly what we want. This keeps
+    -- script-local variables working because the whole session is still one
+    -- sourced script.
+    vim.v.errmsg = ""
+    local ok, err = pcall(function()
+        vim.cmd("silent! source " .. vim.fn.fnameescape(path))
+    end)
 
-    -- Since we didn't register a Vim function that we could call from Lua, and
-    -- just executed pure Vimscript directly, the only way that we have to
-    -- communicate the result is a global variable. Read that variable, and
-    -- turn it into a local boolean value in this function. Then delete the
-    -- global variable so that it doesn't pollute the global namespace. This is
-    -- pretty gross, but it works.
-    local success = (vim.g.session_select_try_source_result == 1)
-    vim.g.session_select_try_source_result = nil
+    if not ok then
+        return false, tostring(err)
+    end
 
-    -- Now that we have sourced the session and cleaned up after ourselves, we
-    -- can finally return the result.
-    return success
+    local errmsg = vim.v.errmsg
+    return true, (errmsg ~= "" and errmsg or nil)
 end
 
 -- Wipe all buffers from the current session so they don't linger alongside the
@@ -713,15 +844,21 @@ function M.load_session(params)
             end
 
             local filtered_path = M._filter_session(path)
-            local source_success = false
+            local source_path = filtered_path or path
+            local source_success, source_errmsg = M._try_source(source_path)
             if filtered_path then
-                source_success = M._try_source(filtered_path)
                 os.remove(filtered_path)
-            else
-                source_success = M._try_source(path)
             end
+
             if source_success then
                 print("loaded session: " .. path .. "\n")
+                if source_errmsg then
+                    print(
+                        "warning: some session commands failed (last error: "
+                            .. source_errmsg
+                            .. ")\n"
+                    )
+                end
                 M.current_session = name
             else
                 print("error loading session: " .. path .. "\n")

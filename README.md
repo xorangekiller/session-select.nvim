@@ -46,6 +46,9 @@ management plugins for Neovim such as
   specified in the command name to tell it to save/delete without asking).
 - Wipe the current session's buffers and windows before loading another
   session (prompting to save or discard unsaved changes first).
+- Load sessions with a missing file, missing directory, or setting for an
+  option/plugin that no longer exists without preventing the rest of the
+  session from loading.
 
 ## Requirements
 
@@ -124,7 +127,9 @@ to be fairly conservative, but broadly applicable so that *most* users can just
 use it as-is with no adjustments.
 
 Only global assignments are filtered. `setlocal` lines are left alone so that
-per-window and per-buffer session state is still restored.
+per-window and per-buffer session state is still restored, except that
+assignments to options that do not exist in the running version of Neovim are
+removed from `setlocal` lines too (because they would otherwise fail).
 
 If you want to override the default options that are filtered, you may do so by
 adding to the default list, removing from it, or replacing it entirely. The
@@ -146,6 +151,30 @@ filter = {
   },
 }
 ```
+
+### Fault-Tolerant Session Loading
+
+Sessions frequently outlive the exact configuration that created them. A
+session may refer to a file or directory that has since been deleted, or
+contain settings for an option or plugin that is no longer available. Rather
+than aborting at the first such command, this plugin still attempts to load the
+remainder of the session.
+
+- Missing files are opened as empty, named buffers so that the saved window and
+  tab layout is preserved. No file is created unless you save the buffer.
+- Directory changes (`cd`, `lcd`, and `tcd`) whose target no longer exists are
+  skipped so that the rest of the session can still load.
+- Assignments to options that the running version of Neovim does not recognize
+  are skipped when option filtering is enabled (the default). This includes
+  settings left behind by plugins or newer Neovim versions.
+- Errors from any other command (for example, a mapping or autocommand that
+  refers to a plugin that is not loaded) are skipped and loading continues.
+
+After loading, if any commands were skipped, a single warning reports the last
+error that was suppressed. For developers who need to see the default behavior
+of stopping upon encountering the first error, setting
+`debug.unconditional_source = true` disables this behavior and sources sessions
+exactly as they are on disk.
 
 ## Usage
 
