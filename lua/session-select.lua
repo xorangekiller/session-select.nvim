@@ -162,14 +162,17 @@ function M.register_commands()
     vim.api.nvim_create_user_command("SaveSession", M.save_session, {
         nargs = "?",
         bang = true, -- Overwrite an existing session without asking.
+        complete = M._complete_session,
     })
     vim.api.nvim_create_user_command("LoadSession", M.load_session, {
         nargs = "?",
         bang = true, -- Always load the given session even if it is already loaded.
+        complete = M._complete_session,
     })
     vim.api.nvim_create_user_command("DeleteSession", M.delete_session, {
         nargs = "?",
         bang = true, -- Delete the given session without asking.
+        complete = M._complete_session,
     })
 end
 
@@ -249,6 +252,30 @@ function M._list_sessions()
     table.sort(contents)
 
     return contents
+end
+
+-- Return the saved session names that start with the given prefix.
+--
+-- This is used as the completion callback for the commands. Completion
+-- callbacks must not raise errors, so a failure to read the session directory
+-- simply produces no candidates.
+function M._complete_session(arg_lead)
+    local ok, sessions = pcall(M._list_sessions)
+    if not ok then
+        return {}
+    end
+
+    local ignore_case = vim.o.wildignorecase
+    local lead = ignore_case and arg_lead:lower() or arg_lead
+    local matches = {}
+    for _, name in ipairs(sessions) do
+        local candidate = ignore_case and name:lower() or name
+        if candidate:sub(1, #lead) == lead then
+            table.insert(matches, name)
+        end
+    end
+
+    return matches
 end
 
 -- Return a buffer containing the raw contents of the given session file.

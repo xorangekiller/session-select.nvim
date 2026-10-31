@@ -232,6 +232,10 @@ There are three command provided by this plugin.
   - The user may supply a session name after the command, and that is the
     session that will be deleted.
 
+All three commands support tab completion of existing session names for their
+optional session name argument. This includes `:SaveSession`, where completing
+an existing session name is useful for overwriting it.
+
 ## Developing
 
 If you are working on adding new features or fixing bugs in this plugin, there
