@@ -98,6 +98,42 @@ describe("load_session", function()
         assert.equal("test.sess", ss.current_session)
     end)
 
+    it("preview the selected session", function()
+        assert.is_nil(ss.current_session)
+
+        local preview_buf
+        stubs.select.invokes(function(contents, opts, callable)
+            assert.equal("function", type(opts.preview_item))
+            preview_buf = opts.preview_item("test.sess").buf
+            callable("test.sess")
+        end)
+
+        ss.load_session({})
+
+        assert.equal(
+            "let test = 1\necho \"Loaded test session.\"",
+            table.concat(
+                vim.api.nvim_buf_get_lines(preview_buf, 0, -1, false),
+                "\n"
+            )
+        )
+        vim.api.nvim_buf_delete(preview_buf, { force = true })
+    end)
+
+    it("do not provide a preview when previews are disabled", function()
+        ss.options.preview = false
+
+        stubs.select.invokes(function(contents, opts, callable)
+            assert.is_nil(opts.preview_item)
+            callable("")
+        end)
+
+        ss.load_session({})
+
+        assert.stub(stubs.select).was.called()
+        assert.is_nil(ss.current_session)
+    end)
+
     it("do not reload the current session", function()
         ss.current_session = "test.sess"
 

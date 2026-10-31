@@ -100,6 +100,9 @@ may be overridden by supplying it to the `setup()` function for this plugin.
   -- wipe all buffers/windows from the current session before loading another
   -- session (prompts to save/discard unsaved changes)
   wipe_before_load = true,
+  -- show a preview of the session file in pickers that support
+  -- vim.ui.select()'s preview_item callback
+  preview = true,
   -- options to allow filtering things out of existing sessions that are
   -- loaded (set to {} to disable filtering entirely)
   filter = {
@@ -115,6 +118,24 @@ may be overridden by supplying it to the `setup()` function for this plugin.
   },
 }
 ```
+
+### Session Previews
+
+When selecting a session to load or delete, this plugin provides the raw
+contents of the session file to pickers that support
+[`vim.ui.select()`](https://neovim.io/doc/user/lua/#_lua-module:-vim.ui)'s
+`preview_item` callback, which was added in Neovim 0.12.3. Older versions of
+Neovim are still supported, but will not have previews. The preview is syntax
+highlighted as Vim script.
+
+Preview support depends on the picker.
+- **Supported:** [fzf-lua](https://github.com/ibhagwan/fzf-lua)
+- **Supported:** [mini.pick](https://github.com/nvim-mini/mini.pick)
+- **Unsupported:** [snacks.nvim](https://github.com/folke/snacks.nvim)
+- **Unsupported:** [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim)
+
+Set `preview = false` to disable the preview callback entirely, regardless of
+the Neovim version or whether the picker supports it.
 
 ### Filtering Session Options
 

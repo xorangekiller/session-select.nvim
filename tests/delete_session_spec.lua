@@ -68,6 +68,24 @@ describe("delete_session", function()
         assert.truthy(empty_sess:exists())
     end)
 
+    it("preview the selected session", function()
+        local preview_buf
+        stubs.select.invokes(function(contents, opts, callable)
+            assert.equal("function", type(opts.preview_item))
+            preview_buf = opts.preview_item("test.sess").buf
+            callable("test.sess")
+        end)
+        stubs.confirm.returns(1)
+
+        ss.delete_session({})
+
+        assert.same(
+            { "set test = 1" },
+            vim.api.nvim_buf_get_lines(preview_buf, 0, -1, false)
+        )
+        vim.api.nvim_buf_delete(preview_buf, { force = true })
+    end)
+
     it("delete the current session", function()
         stubs.confirm.returns(1)
         ss.current_session = "test.sess"

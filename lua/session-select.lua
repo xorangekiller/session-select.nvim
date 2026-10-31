@@ -78,6 +78,9 @@ local M = {
         -- wipe all buffers/windows from the current session before loading
         -- another session (prompts to save/discard unsaved changes)
         wipe_before_load = true,
+        -- show a preview of the session file in pickers that support
+        -- vim.ui.select()'s preview_item callback
+        preview = true,
         -- options to allow filtering things out of existing sessions that are
         -- loaded (set to {} to disable filtering entirely)
         filter = {
@@ -246,6 +249,54 @@ function M._list_sessions()
     table.sort(contents)
 
     return contents
+end
+
+-- Return a buffer containing the raw contents of the given session file.
+--
+-- This is used as the preview_item callback for vim.ui.select(). Pickers that
+-- do not support previews simply ignore the returned table. A single buffer is
+-- reused for all previews so that pickers which read (but never display) the
+-- buffer do not accumulate one scratch buffer per preview request.
+function M._preview_session(name)
+    local path = M._joinpath(M.options.storage_path, vim.fs.basename(name))
+
+    local ok, lines = pcall(vim.fn.readfile, path)
+    if not ok then
+        lines = { "unable to read session: " .. path }
+    end
+
+    local buf = M._preview_buf
+    if not buf or not vim.api.nvim_buf_is_valid(buf) then
+        buf = vim.api.nvim_create_buf(false, true)
+        M._preview_buf = buf
+        vim.bo[buf].bufhidden = "wipe"
+        vim.bo[buf].swapfile = false
+        vim.bo[buf].filetype = "vim"
+        vim.api.nvim_create_autocmd("BufWipeout", {
+            buffer = buf,
+            once = true,
+            callback = function()
+                if M._preview_buf == buf then
+                    M._preview_buf = nil
+                end
+            end,
+        })
+    end
+
+    vim.bo[buf].modifiable = true
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    vim.bo[buf].modifiable = false
+
+    return { buf = buf }
+end
+
+-- Build the options for a session selection picker.
+function M._selection_options(prompt)
+    local opts = { prompt = prompt }
+    if M.options.preview then
+        opts.preview_item = M._preview_session
+    end
+    return opts
 end
 
 -- Save the current session with the given name, and set it as our current
@@ -815,7 +866,7 @@ function M.load_session(params)
         else
             vim.ui.select(
                 contents,
-                { prompt = "Session to load:" },
+                M._selection_options("Session to load:"),
                 function(choice)
                     if choice and choice ~= "" then
                         M.load_session({ args = choice })
@@ -884,7 +935,7 @@ function M.delete_session(params)
             print("contents: " .. table.concat(contents, ", "))
             vim.ui.select(
                 contents,
-                { prompt = "Session to delete:" },
+                M._selection_options("Session to delete:"),
                 function(choice)
                     if choice and choice ~= "" then
                         M.delete_session({ args = choice })
